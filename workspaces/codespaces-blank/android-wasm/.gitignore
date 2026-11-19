@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+data/*
+!data/.keep
+disks/*
+!disks/.keep
+logs/*
+!logs/.keep
+run/*
+!run/.keep

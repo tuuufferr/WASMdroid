@@ -1,0 +1,3 @@
+Android-in-Browser-QEMU-Boot v1.0.0
+Execution model: Native QEMU in Codespace + VNC/WebSocket + noVNC browser display
+Android image: User-provided Android-x86 9.0-r2 x86_64 ISO

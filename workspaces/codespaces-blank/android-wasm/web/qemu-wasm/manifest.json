@@ -1,0 +1,9 @@
+{
+  "target": "x86_64-softmmu",
+  "qemuVersion": "8.2.0",
+  "sourceRevision": "0ef7b4e2814b231705d8371dd7997f5b72e70baf",
+  "machine": "pc (i440FX/PIIX IDE)",
+  "isoDevice": "ide-cd, read-only",
+  "diskDevice": "ide-hd, raw and writable",
+  "display": "SDL2 with OffscreenCanvas"
+}

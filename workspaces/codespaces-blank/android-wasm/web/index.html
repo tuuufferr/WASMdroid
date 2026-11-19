@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Android in Browser — Boot Console</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header><div class="eyebrow">ANDROID-X86 • BROWSER STORAGE • QEMU</div><h1>Android boot console</h1><p>Select an Android-x86 ISO from your device and save it in this browser. The ISO is not uploaded to the Codespace.</p></header>
+<main>
+  <section class="card">
+    <div class="section-head"><h2>1. Check environment</h2><button id="refresh" class="small">Refresh</button></div>
+    <div id="checks" class="checks"><span>Checking tools…</span></div>
+  </section>
+  <section class="card">
+    <h2>2. Add Android-x86 ISO</h2>
+    <p class="muted">Choose <code>android-x86_64-9.0-r2.iso</code>. Saving uses the browser File API and Origin Private File System (OPFS), with chunked writes. The ISO stays on this device and is not sent through HTTP.</p>
+    <div class="upload-row"><input type="file" id="isoFile" accept=".iso,application/x-iso9660-image"><button id="upload">Save ISO in this browser</button></div>
+    <div class="progress hidden" id="progressWrap" role="progressbar" aria-label="ISO save progress" aria-valuemin="0" aria-valuemax="100"><div id="progressBar"></div></div><div id="uploadMessage" class="muted statusline" aria-live="polite"></div>
+    <div id="isoInfo" class="info"></div>
+  </section>
+  <section class="card">
+    <h2>3. Virtual hard disk</h2>
+    <p class="muted">A blank 8 GiB raw hard disk is created in this browser's OPFS after checking the reported storage quota. It is separate from the Android ISO and remains in browser storage across refreshes. Resetting it permanently deletes its contents.</p>
+    <div class="disk-status">
+      <div><b>Virtual disk created</b><span id="diskCreatedStatus">Checking…</span></div>
+      <div><b>Virtual disk attached</b><span id="diskAttachedStatus">No — QEMU-WASM not started</span></div>
+      <div><b>Disk capacity</b><span id="diskCapacityStatus">Checking…</span></div>
+      <div><b>Storage error</b><span id="diskErrorStatus" class="good">None</span></div>
+    </div>
+    <div class="actions disk-actions"><button id="manageDisk">Create / reset virtual disk</button></div>
+    <div id="diskMessage" class="statusline muted" aria-live="polite"></div>
+  </section>
+  <section class="card">
+    <h2>4. Start Android</h2>
+    <p class="muted">QEMU-WASM runs in a dedicated browser worker. The Android ISO is attached read-only and the 8 GiB OPFS disk is attached writable; native Codespace QEMU is not used for these files.</p>
+    <div class="actions"><button id="startIso" class="primary" disabled>Start from browser ISO</button><button id="startDisk" disabled>Boot installed Android from disk</button><button id="stop" class="danger" disabled>Stop VM</button></div>
+    <p class="muted small-note">Starting from the ISO boots the installer/live system. Install Android to the virtual disk before using the disk-first option.</p>
+    <div id="vmMessage" class="statusline"></div>
+    <div id="screenLink" class="screen-link hidden"><a id="vncLink" target="_blank" rel="noopener">Open native fallback display in noVNC ↗</a><span>The native VM is separate and cannot access browser OPFS.</span></div>
+    <div id="screenWrap" class="screen-wrap hidden"><canvas id="qemuScreen" width="1024" height="768" aria-label="QEMU-WASM display"></canvas></div>
+  </section>
+  <section class="card">
+    <div class="section-head"><h2>5. Live diagnostics</h2><span id="vmState" class="pill">Not started</span></div>
+    <div class="monitor-row"><input id="monitorCommand" type="text" autocomplete="off" placeholder="QEMU monitor command, e.g. info block" aria-label="QEMU monitor command"><button id="sendMonitor" disabled>Send monitor command</button></div>
+    <div class="grid"><div><label>QEMU output</label><pre id="qemuLog">No log yet.</pre></div><div><label>Serial output</label><pre id="serialLog">No serial bytes yet.</pre></div></div>
+  </section>
+  <section class="card subtle">
+    <h2>Architecture status</h2>
+    <p>The browser worker opens OPFS directly. It exposes the ISO through a chunked, read-only Emscripten file node and the raw disk through random-access OPFS synchronous reads/writes; QEMU sees ordinary paths and attaches them to the PC machine's IDE controller.</p>
+  </section>
+</main>
+<footer>Android Browser Boot • user-supplied Android-x86 ISO • no Google proprietary components included</footer>
+<script src="/app.js"></script>
+</body></html>

@@ -3,14 +3,18 @@ const ISO_STORAGE_NAME = 'android-x86.iso';
 const ISO_METADATA_NAME = 'android-x86-metadata.json';
 const DISK_STORAGE_NAME = 'android-data.raw';
 const DISK_CAPACITY_BYTES = 8 * 1024 ** 3;
+const MONITOR_HEADER_BYTES = 8;
+const MONITOR_CAPACITY = 4096;
 let diskError = '';
 let wasmManifest = null;
 let wasmWorker = null;
+let wasmMonitorBuffer = null;
 let wasmReady = false; // QEMU monitor ready; not proof of Android boot.
 let wasmEverStarted = false;
 let wasmIsoAttached = false;
 let wasmDiskAttached = false;
 let wasmBlockInfoReceived = false;
+let wasmBlockInfoTimedOut = false;
 let wasmGraphicsPreflight = null;
 let wasmCanvasTransferred = false;
 let wasmGuestBootObserved = false;
@@ -381,6 +385,8 @@ async function refresh() {
         ? 'Waiting for the QEMU monitor'
         : !wasmBlockInfoReceived
           ? 'Monitor ready; checking info block…'
+          : wasmBlockInfoTimedOut
+            ? 'Not verified — QEMU info block response unavailable'
           : wasmDiskAttached
             ? 'Confirmed by QEMU info block'
             : 'Not confirmed by QEMU info block';
@@ -388,10 +394,10 @@ async function refresh() {
       ? 'Not run'
       : wasmGraphicsPreflight ? 'PASS — worker WebGL test' : 'FAIL — see QEMU output';
     $('monitorStatus').textContent = wasmReady ? 'Monitor prompt received' : wasmWorker ? 'Starting…' : 'Not started';
-    $('isoAttachedStatus').textContent = wasmBlockInfoReceived
+    $('isoAttachedStatus').textContent = wasmBlockInfoReceived && !wasmBlockInfoTimedOut
       ? wasmIsoAttached ? 'Confirmed by QEMU info block' : 'Not confirmed by QEMU info block'
       : 'Not verified';
-    $('diskDeviceStatus').textContent = wasmBlockInfoReceived
+    $('diskDeviceStatus').textContent = wasmBlockInfoReceived && !wasmBlockInfoTimedOut
       ? wasmDiskAttached ? 'Confirmed by QEMU info block' : 'Not confirmed by QEMU info block'
       : 'Not verified';
     $('canvasStatus').textContent = wasmCanvasTransferred
@@ -487,11 +493,11 @@ function handleWasmWorkerMessage(event) {
     wasmBlockInfoReceived = true;
     wasmIsoAttached = Boolean(message.isoAttached);
     wasmDiskAttached = Boolean(message.diskAttached);
-    const verificationNote = message.timedOut
-      ? ' (monitor response timed out after 8 seconds)'
-      : message.error ? ` (${message.error})` : '';
-    const summary = `QEMU info block: ISO ${wasmIsoAttached ? 'confirmed' : 'NOT confirmed'}; disk ${wasmDiskAttached ? 'confirmed' : 'NOT confirmed'}${verificationNote}.`;
-    setMessage('vmMessage', summary, !(wasmIsoAttached && wasmDiskAttached));
+    wasmBlockInfoTimedOut = Boolean(message.timedOut);
+    const summary = message.timedOut
+      ? `QEMU info block unavailable; ISO and disk are unverified (${message.inputConsumed ? 'monitor input reached QEMU, but no response arrived' : 'monitor input was not consumed by QEMU'}).`
+      : `QEMU info block: ISO ${wasmIsoAttached ? 'confirmed' : 'NOT confirmed'}; disk ${wasmDiskAttached ? 'confirmed' : 'NOT confirmed'}${message.error ? ` (${message.error})` : ''}.`;
+    setMessage('vmMessage', summary, message.timedOut || !(wasmIsoAttached && wasmDiskAttached));
     if (message.detail) appendWasmLog('monitor', `\n[info block verification]\n${message.detail}`);
     void refresh();
   }
@@ -511,9 +517,12 @@ function handleWasmWorkerMessage(event) {
     wasmReady = false;
     wasmEverStarted = true;
     wasmWorker = null;
+    wasmMonitorBuffer = null;
     wasmIsoAttached = false;
     wasmDiskAttached = false;
     wasmBlockInfoReceived = false;
+    wasmBlockInfoTimedOut = false;
+    wasmBlockInfoTimedOut = false;
     wasmCanvasTransferred = false;
     if (message.flushError) {
       setMessage('vmMessage', `QEMU stopped, but OPFS disk flush failed: ${message.flushError}`, true);
@@ -560,6 +569,7 @@ async function startWasmVm(mode) {
     return;
   }
   const workerUrl = new URL('qemu-wasm/worker.js', document.baseURI);
+  wasmMonitorBuffer = new SharedArrayBuffer(MONITOR_HEADER_BYTES + MONITOR_CAPACITY);
   const worker = new Worker(workerUrl);
   wasmWorker = worker;
   worker.addEventListener('message', handleWasmWorkerMessage);
@@ -568,7 +578,10 @@ async function startWasmVm(mode) {
   });
   wasmCanvasTransferred = true;
   $('canvasStatus').textContent = 'Transferred to worker; guest frame not yet verified';
-  worker.postMessage({type: 'start', mode, canvas: offscreen}, [offscreen]);
+  worker.postMessage(
+    {type: 'start', mode, canvas: offscreen, monitorBuffer: wasmMonitorBuffer},
+    [offscreen],
+  );
   $('vmState').textContent = 'QEMU-WASM starting';
   $('screenWrap').classList.remove('hidden');
   setMessage('vmMessage', 'Opening OPFS files and initializing QEMU-WASM…');
@@ -652,8 +665,6 @@ $('sendMonitor').addEventListener('click', () => {
   const command = $('monitorCommand').value.trim();
   if (!command || !wasmWorker || !wasmReady) return;
   try {
-    // Do not write into a shared ring buffer: the worker's PTY path emits
-    // the readable event QEMU is waiting for.
     wasmWorker.postMessage({type: 'monitor', command});
     $('monitorCommand').value = '';
   } catch (error) {

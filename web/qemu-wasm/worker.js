@@ -12,11 +12,17 @@ let monitorOutput = '';
 let blockInfoPending = false;
 let blockInfoOutput = '';
 let blockInfoTimer = null;
+let monitorInputBuffer = null;
+let monitorInputControl = null;
+let monitorInputBytes = null;
+let monitorInputConsumed = false;
 const monitorDecoder = new TextDecoder();
 
 const DISK_BYTES = 8 * 1024 ** 3;
 const ISO_PATH = '/opfs/android-x86.iso';
 const DISK_PATH = '/opfs/android-data.raw';
+const MONITOR_HEADER_BYTES = 8;
+const MONITOR_CAPACITY = 4096;
 
 function post(type, fields = {}) {
   self.postMessage({type, ...fields});
@@ -181,7 +187,11 @@ function finish(exitCode, errorMessage = '') {
 }
 
 function monitorPromptAtEnd(text) {
-  return /\(qemu\)\s*$/.test(String(text).trimEnd());
+  const plain = String(text)
+    .replace(/\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~])/g, '')
+    .replace(/\r/g, '')
+    .trimEnd();
+  return /\(qemu\)\s*$/.test(plain);
 }
 
 function completeBlockInfo(timedOut = false, error = '') {
@@ -194,6 +204,7 @@ function completeBlockInfo(timedOut = false, error = '') {
     diskAttached: blockInfoOutput.includes(DISK_PATH),
     timedOut,
     error,
+    inputConsumed: monitorInputConsumed,
     detail: blockInfoOutput.slice(-4000),
   });
 }
@@ -202,19 +213,18 @@ function requestBlockInfo() {
   if (blockInfoPending || !writeToPty || finished) return;
   blockInfoPending = true;
   blockInfoOutput = '';
+  monitorInputConsumed = false;
 
   // Start the timeout before attempting to write. A failed send must still
   // result in a visible failure instead of an infinite "checking" state.
   blockInfoTimer = setTimeout(() => {
-    completeBlockInfo(true, 'QEMU did not return the info block prompt within 8 seconds.');
-  }, 8000);
+    completeBlockInfo(true, 'QEMU did not return the info block response within 30 seconds.');
+  }, 30000);
 
-  // Defer until after the monitor-output callback has been acknowledged.
   setTimeout(() => {
     if (!blockInfoPending || finished) return;
     try {
-      if (!writeToPty) throw new Error('The QEMU monitor PTY is unavailable.');
-      writeToPty('info block\r');
+      sendMonitorCommand('info block');
     } catch (error) {
       completeBlockInfo(true, `Could not send info block: ${error.message}`);
     }
@@ -229,7 +239,8 @@ function onMonitorData(bytes, acknowledge) {
   let blockInfoComplete = false;
   if (blockInfoPending) {
     blockInfoOutput = (blockInfoOutput + text).slice(-8000);
-    blockInfoComplete = monitorPromptAtEnd(blockInfoOutput);
+    blockInfoComplete = monitorPromptAtEnd(blockInfoOutput)
+      || (blockInfoOutput.includes(ISO_PATH) && blockInfoOutput.includes(DISK_PATH));
   }
   const firstPrompt = !ready && monitorPromptAtEnd(monitorOutput);
 
@@ -248,7 +259,7 @@ function onMonitorData(bytes, acknowledge) {
     ready = true;
     post('ready', {
       machine: 'pc (i440FX/PIIX IDE)',
-      devices: 'Monitor prompt detected; testing monitor input.',
+      devices: 'Monitor prompt detected; testing monitor input channel.',
     });
     if (stopRequested) {
       setTimeout(() => {
@@ -264,7 +275,85 @@ function onMonitorData(bytes, acknowledge) {
   }
 }
 
-function activatePty(master, slave) {
+function attachSharedMonitorInput(slave, buffer) {
+  if (!(buffer instanceof SharedArrayBuffer) ||
+      buffer.byteLength < MONITOR_HEADER_BYTES + MONITOR_CAPACITY) {
+    throw new Error('The shared QEMU monitor input buffer is unavailable or invalid.');
+  }
+  monitorInputBuffer = buffer;
+  monitorInputControl = new Int32Array(buffer, 0, 2);
+  monitorInputBytes = new Uint8Array(buffer, MONITOR_HEADER_BYTES, MONITOR_CAPACITY);
+
+  const readableDescriptor = Object.getOwnPropertyDescriptor(
+    Object.getPrototypeOf(slave),
+    'readable',
+  );
+  const originalReadable = readableDescriptor.get.bind(slave);
+  const originalRead = slave.read.bind(slave);
+  Object.defineProperty(slave, 'readable', {
+    get() {
+      return originalReadable()
+        || Atomics.load(monitorInputControl, 0) !== Atomics.load(monitorInputControl, 1);
+    },
+  });
+  slave.read = length => {
+    const wakeBytes = originalRead(length);
+    if (!length) return wakeBytes;
+
+    const readIndex = Atomics.load(monitorInputControl, 0);
+    const writeIndex = Atomics.load(monitorInputControl, 1);
+    if (readIndex === writeIndex) return wakeBytes;
+
+    const available = (writeIndex - readIndex + MONITOR_CAPACITY) % MONITOR_CAPACITY;
+    const count = Math.min(length, available);
+    const bytes = new Uint8Array(count);
+    for (let index = 0; index < count; index++) {
+      bytes[index] = monitorInputBytes[(readIndex + index) % MONITOR_CAPACITY];
+    }
+    Atomics.store(monitorInputControl, 0, (readIndex + count) % MONITOR_CAPACITY);
+    Atomics.notify(monitorInputControl, 0);
+    monitorInputConsumed = true;
+    post('monitor-pty-read', {
+      bytes: count,
+      data: new TextDecoder().decode(bytes),
+    });
+    return Array.from(bytes);
+  };
+}
+
+function sendMonitorCommand(command) {
+  if (!monitorInputBuffer || !monitorInputControl || !monitorInputBytes || !writeToPty) {
+    throw new Error('The shared QEMU monitor input channel is unavailable.');
+  }
+  const bytes = new TextEncoder().encode(`${command}\r`);
+  if (bytes.length > MONITOR_CAPACITY - 1) {
+    throw new Error('The QEMU monitor command is too long.');
+  }
+
+  const readIndex = Atomics.load(monitorInputControl, 0);
+  let writeIndex = Atomics.load(monitorInputControl, 1);
+  const used = (writeIndex - readIndex + MONITOR_CAPACITY) % MONITOR_CAPACITY;
+  if (bytes.length > MONITOR_CAPACITY - used - 1) {
+    throw new Error('The QEMU monitor is still processing input. Wait and try again.');
+  }
+  for (const byte of bytes) {
+    monitorInputBytes[writeIndex] = byte;
+    writeIndex = (writeIndex + 1) % MONITOR_CAPACITY;
+  }
+  Atomics.store(monitorInputControl, 1, writeIndex);
+  Atomics.notify(monitorInputControl, 1);
+
+  // The shared ring buffer carries the command; a PTY newline only wakes
+  // QEMU's poll/read path so it checks that buffer.
+  writeToPty('\n');
+  post('monitor-input-sent', {
+    bytes: bytes.length,
+    slaveReadable: true,
+    transport: 'shared buffer',
+  });
+}
+
+function activatePty(master) {
   const dataListeners = new Set();
   const binaryListeners = new Set();
   const resizeListeners = new Set();
@@ -287,20 +376,6 @@ function activatePty(master, slave) {
       return {dispose: () => resizeListeners.delete(callback)};
     },
   });
-
-
-  // Report bytes actually consumed by Emscripten/QEMU, not merely queued.
-  const originalRead = slave.read.bind(slave);
-  slave.read = length => {
-    const bytes = originalRead(length);
-    if (bytes.length) {
-      post('monitor-pty-read', {
-        bytes: bytes.length,
-        data: new TextDecoder().decode(Uint8Array.from(bytes)),
-      });
-    }
-    return bytes;
-  };
 
 
   return text => {
@@ -399,8 +474,9 @@ async function start(message) {
     await openStorage();
     importScripts('./pty.js');
     const {master, slave} = openpty();
+    attachSharedMonitorInput(slave, message.monitorBuffer);
     ptyMaster = master;
-    writeToPty = activatePty(master, slave);
+    writeToPty = activatePty(master);
 
     const mode = message.mode === 'disk' ? 'disk' : 'iso';
     const moduleUrl = new URL('./qemu-system-x86_64.js', self.location.href).href;
@@ -462,7 +538,7 @@ self.addEventListener('message', event => {
     stopRequested = true;
     if (writeToPty && ready) {
       try {
-        writeToPty('quit\r');
+        sendMonitorCommand('quit');
       } catch (error) {
         post('error', {message: `Could not send QEMU quit command: ${error.message}`});
       }
@@ -473,7 +549,7 @@ self.addEventListener('message', event => {
     const command = String(message.command || '').trim();
     if (!command || command.length > 4096) return;
     try {
-      writeToPty(`${command}\r`);
+      sendMonitorCommand(command);
     } catch (error) {
       post('error', {message: `Could not send QEMU monitor command: ${error.message}`});
     }

@@ -469,6 +469,14 @@ function appendWasmLog(which, text) {
 function handleWasmWorkerMessage(event) {
   const message = event.data || {};
   if (message.type === 'monitor-output') appendWasmLog('monitor', message.data);
+  if (message.type === 'monitor-input-sent') {
+    appendWasmLog('monitor',
+      `\n[PTY input queued: ${message.bytes} bytes; slaveReadable=${message.slaveReadable}]\n`);
+  }
+  if (message.type === 'monitor-pty-read') {
+    appendWasmLog('monitor',
+      `\n[PTY bytes consumed by QEMU: ${JSON.stringify(message.data)}]\n`);
+  }
   if (message.type === 'serial-output') appendWasmLog('serial', message.data);
   if (message.type === 'status') setMessage('vmMessage', message.message);
   if (message.type === 'graphics-preflight') {

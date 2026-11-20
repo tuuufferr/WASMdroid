@@ -198,24 +198,6 @@ function completeBlockInfo(timedOut = false, error = '') {
   });
 }
 
-function monitorPromptAtEnd(text) {
-  return /\(qemu\)\s*$/.test(String(text).trimEnd());
-}
-
-function completeBlockInfo(timedOut = false, error = '') {
-  if (!blockInfoPending) return;
-  blockInfoPending = false;
-  if (blockInfoTimer) clearTimeout(blockInfoTimer);
-  blockInfoTimer = null;
-  post('block-devices', {
-    isoAttached: blockInfoOutput.includes(ISO_PATH),
-    diskAttached: blockInfoOutput.includes(DISK_PATH),
-    timedOut,
-    error,
-    detail: blockInfoOutput.slice(-4000),
-  });
-}
-
 function requestBlockInfo() {
   if (blockInfoPending || !writeToPty || finished) return;
   blockInfoPending = true;
@@ -266,7 +248,7 @@ function onMonitorData(bytes, acknowledge) {
     ready = true;
     post('ready', {
       machine: 'pc (i440FX/PIIX IDE)',
-      devices: 'Monitor prompt received; checking block devices with info block.',
+      devices: 'Monitor prompt detected; testing monitor input.',
     });
     if (stopRequested) {
       setTimeout(() => {
@@ -282,10 +264,12 @@ function onMonitorData(bytes, acknowledge) {
   }
 }
 
-function activatePty(master) {
+function activatePty(master, slave) {
   const dataListeners = new Set();
   const binaryListeners = new Set();
   const resizeListeners = new Set();
+
+
   master.activate({
     cols: 80,
     rows: 24,
@@ -303,10 +287,45 @@ function activatePty(master) {
       return {dispose: () => resizeListeners.delete(callback)};
     },
   });
+
+
+  // Report bytes actually consumed by Emscripten/QEMU, not merely queued.
+  const originalRead = slave.read.bind(slave);
+  slave.read = length => {
+    const bytes = originalRead(length);
+    if (bytes.length) {
+      post('monitor-pty-read', {
+        bytes: bytes.length,
+        data: new TextDecoder().decode(Uint8Array.from(bytes)),
+      });
+    }
+    return bytes;
+  };
+
+
   return text => {
-    for (const callback of dataListeners) callback(text);
+    const input = String(text);
+    const lineDiscipline = master.ldisc;
+
+
+    if (!lineDiscipline ||
+        typeof lineDiscipline.writeFromLower !== 'function') {
+      throw new Error('PTY master line discipline is unavailable.');
+    }
+
+
+    // This is the same input path used by xterm-pty's master addon.
+    // It queues bytes for slave.read() and signals the QEMU-side reader.
+    lineDiscipline.writeFromLower(input);
+
+
+    post('monitor-input-sent', {
+      bytes: new TextEncoder().encode(input).length,
+      slaveReadable: Boolean(slave.readable),
+    });
   };
 }
+
 
 function probeWorkerWebGL() {
   if (typeof OffscreenCanvas !== 'function') return {ok: false, detail: 'OffscreenCanvas unavailable in worker.'};
@@ -381,7 +400,7 @@ async function start(message) {
     importScripts('./pty.js');
     const {master, slave} = openpty();
     ptyMaster = master;
-    writeToPty = activatePty(master);
+    writeToPty = activatePty(master, slave);
 
     const mode = message.mode === 'disk' ? 'disk' : 'iso';
     const moduleUrl = new URL('./qemu-system-x86_64.js', self.location.href).href;

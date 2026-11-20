@@ -17,8 +17,6 @@ const monitorDecoder = new TextDecoder();
 const DISK_BYTES = 8 * 1024 ** 3;
 const ISO_PATH = '/opfs/android-x86.iso';
 const DISK_PATH = '/opfs/android-data.raw';
-const MONITOR_HEADER_BYTES = 8;
-const MONITOR_CAPACITY = 4096;
 
 function post(type, fields = {}) {
   self.postMessage({type, ...fields});
@@ -182,51 +180,106 @@ function finish(exitCode, errorMessage = '') {
   setTimeout(() => self.close(), 0);
 }
 
+function monitorPromptAtEnd(text) {
+  return /\(qemu\)\s*$/.test(String(text).trimEnd());
+}
+
+function completeBlockInfo(timedOut = false, error = '') {
+  if (!blockInfoPending) return;
+  blockInfoPending = false;
+  if (blockInfoTimer) clearTimeout(blockInfoTimer);
+  blockInfoTimer = null;
+  post('block-devices', {
+    isoAttached: blockInfoOutput.includes(ISO_PATH),
+    diskAttached: blockInfoOutput.includes(DISK_PATH),
+    timedOut,
+    error,
+    detail: blockInfoOutput.slice(-4000),
+  });
+}
+
+function monitorPromptAtEnd(text) {
+  return /\(qemu\)\s*$/.test(String(text).trimEnd());
+}
+
+function completeBlockInfo(timedOut = false, error = '') {
+  if (!blockInfoPending) return;
+  blockInfoPending = false;
+  if (blockInfoTimer) clearTimeout(blockInfoTimer);
+  blockInfoTimer = null;
+  post('block-devices', {
+    isoAttached: blockInfoOutput.includes(ISO_PATH),
+    diskAttached: blockInfoOutput.includes(DISK_PATH),
+    timedOut,
+    error,
+    detail: blockInfoOutput.slice(-4000),
+  });
+}
+
 function requestBlockInfo() {
-  if (blockInfoPending || !writeToPty) return;
+  if (blockInfoPending || !writeToPty || finished) return;
   blockInfoPending = true;
   blockInfoOutput = '';
-  writeToPty('info block\r');
+
+  // Start the timeout before attempting to write. A failed send must still
+  // result in a visible failure instead of an infinite "checking" state.
   blockInfoTimer = setTimeout(() => {
-    if (!blockInfoPending) return;
-    blockInfoPending = false;
-    post('block-devices', {
-      isoAttached: blockInfoOutput.includes('/opfs/android-x86.iso'),
-      diskAttached: blockInfoOutput.includes('/opfs/android-data.raw'),
-      timedOut: true,
-      detail: blockInfoOutput.slice(-4000),
-    });
+    completeBlockInfo(true, 'QEMU did not return the info block prompt within 8 seconds.');
   }, 8000);
+
+  // Defer until after the monitor-output callback has been acknowledged.
+  setTimeout(() => {
+    if (!blockInfoPending || finished) return;
+    try {
+      if (!writeToPty) throw new Error('The QEMU monitor PTY is unavailable.');
+      writeToPty('info block\r');
+    } catch (error) {
+      completeBlockInfo(true, `Could not send info block: ${error.message}`);
+    }
+  }, 0);
 }
 
 function onMonitorData(bytes, acknowledge) {
   const text = monitorDecoder.decode(Uint8Array.from(bytes), {stream: true});
   monitorOutput = (monitorOutput + text).slice(-16000);
   post('monitor-output', {data: text});
+
+  let blockInfoComplete = false;
   if (blockInfoPending) {
     blockInfoOutput = (blockInfoOutput + text).slice(-8000);
-    if (blockInfoOutput.includes('(qemu)')) {
-      blockInfoPending = false;
-      if (blockInfoTimer) clearTimeout(blockInfoTimer);
-      blockInfoTimer = null;
-      post('block-devices', {
-        isoAttached: blockInfoOutput.includes('/opfs/android-x86.iso'),
-        diskAttached: blockInfoOutput.includes('/opfs/android-data.raw'),
-        timedOut: false,
-        detail: blockInfoOutput.slice(-4000),
-      });
+    blockInfoComplete = monitorPromptAtEnd(blockInfoOutput);
+  }
+  const firstPrompt = !ready && monitorPromptAtEnd(monitorOutput);
+
+  // Release the PTY output queue before scheduling another monitor command.
+  if (acknowledge) {
+    try {
+      acknowledge();
+    } catch (error) {
+      post('error', {message: `Could not acknowledge QEMU monitor output: ${error.message}`});
     }
   }
-  if (!ready && monitorOutput.includes('(qemu)')) {
+
+  if (blockInfoComplete) completeBlockInfo(false);
+
+  if (firstPrompt) {
     ready = true;
     post('ready', {
       machine: 'pc (i440FX/PIIX IDE)',
       devices: 'Monitor prompt received; checking block devices with info block.',
     });
-    requestBlockInfo();
-    if (stopRequested) writeToPty('quit\r');
+    if (stopRequested) {
+      setTimeout(() => {
+        try {
+          if (writeToPty) writeToPty('quit\r');
+        } catch (error) {
+          post('error', {message: `Could not send QEMU quit command: ${error.message}`});
+        }
+      }, 0);
+    } else {
+      setTimeout(requestBlockInfo, 0);
+    }
   }
-  if (acknowledge) acknowledge();
 }
 
 function activatePty(master) {
@@ -252,41 +305,6 @@ function activatePty(master) {
   });
   return text => {
     for (const callback of dataListeners) callback(text);
-  };
-}
-
-function attachSharedMonitorInput(slave, buffer) {
-  if (!(buffer instanceof SharedArrayBuffer) || buffer.byteLength < MONITOR_HEADER_BYTES + MONITOR_CAPACITY) {
-    throw new Error('The QEMU monitor input buffer is unavailable or invalid.');
-  }
-  const control = new Int32Array(buffer, 0, 2);
-  const input = new Uint8Array(buffer, MONITOR_HEADER_BYTES, MONITOR_CAPACITY);
-  const readableDescriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(slave), 'readable');
-  const originalReadable = readableDescriptor.get.bind(slave);
-  const originalRead = slave.read.bind(slave);
-
-  Object.defineProperty(slave, 'readable', {
-    get() {
-      return originalReadable() || Atomics.load(control, 0) !== Atomics.load(control, 1);
-    },
-  });
-  slave.read = length => {
-    const buffered = originalRead(length);
-    if (buffered.length || !length) return buffered;
-
-    const readIndex = Atomics.load(control, 0);
-    const writeIndex = Atomics.load(control, 1);
-    if (readIndex === writeIndex) return [];
-
-    const available = (writeIndex - readIndex + MONITOR_CAPACITY) % MONITOR_CAPACITY;
-    const count = Math.min(length, available);
-    const bytes = new Array(count);
-    for (let index = 0; index < count; index++) {
-      bytes[index] = input[(readIndex + index) % MONITOR_CAPACITY];
-    }
-    Atomics.store(control, 0, (readIndex + count) % MONITOR_CAPACITY);
-    Atomics.notify(control, 0);
-    return bytes;
   };
 }
 
@@ -358,7 +376,6 @@ async function start(message) {
     await openStorage();
     importScripts('./pty.js');
     const {master, slave} = openpty();
-    attachSharedMonitorInput(slave, message.monitorBuffer);
     ptyMaster = master;
     writeToPty = activatePty(master);
 
@@ -420,11 +437,22 @@ self.addEventListener('message', event => {
   }
   if (message.type === 'stop') {
     stopRequested = true;
-    if (writeToPty) writeToPty('quit\r');
+    if (writeToPty && ready) {
+      try {
+        writeToPty('quit\r');
+      } catch (error) {
+        post('error', {message: `Could not send QEMU quit command: ${error.message}`});
+      }
+    }
     return;
   }
   if (message.type === 'monitor' && ptyMaster && ready) {
     const command = String(message.command || '').trim();
-    if (command && command.length <= 4096 && writeToPty) writeToPty(`${command}\r`);
+    if (!command || command.length > 4096) return;
+    try {
+      writeToPty(`${command}\r`);
+    } catch (error) {
+      post('error', {message: `Could not send QEMU monitor command: ${error.message}`});
+    }
   }
 });

@@ -3,12 +3,9 @@ const ISO_STORAGE_NAME = 'android-x86.iso';
 const ISO_METADATA_NAME = 'android-x86-metadata.json';
 const DISK_STORAGE_NAME = 'android-data.raw';
 const DISK_CAPACITY_BYTES = 8 * 1024 ** 3;
-const MONITOR_HEADER_BYTES = 8;
-const MONITOR_CAPACITY = 4096;
 let diskError = '';
 let wasmManifest = null;
 let wasmWorker = null;
-let wasmMonitorBuffer = null;
 let wasmReady = false; // QEMU monitor ready; not proof of Android boot.
 let wasmEverStarted = false;
 let wasmIsoAttached = false;
@@ -309,28 +306,6 @@ function hasWasmSharedMemorySupport() {
   return window.crossOriginIsolated === true && typeof SharedArrayBuffer !== 'undefined';
 }
 
-function writeWasmMonitorInput(command) {
-  if (!wasmMonitorBuffer) throw new Error('The QEMU monitor input channel is unavailable.');
-  const bytes = new TextEncoder().encode(`${command}\r`);
-  if (bytes.length > MONITOR_CAPACITY - 1) throw new Error('The QEMU monitor command is too long.');
-
-  const control = new Int32Array(wasmMonitorBuffer, 0, 2);
-  const input = new Uint8Array(wasmMonitorBuffer, MONITOR_HEADER_BYTES, MONITOR_CAPACITY);
-  const readIndex = Atomics.load(control, 0);
-  let writeIndex = Atomics.load(control, 1);
-  const used = (writeIndex - readIndex + MONITOR_CAPACITY) % MONITOR_CAPACITY;
-  if (bytes.length > MONITOR_CAPACITY - used - 1) {
-    throw new Error('The QEMU monitor is still processing input. Wait for its response and try again.');
-  }
-
-  for (const byte of bytes) {
-    input[writeIndex] = byte;
-    writeIndex = (writeIndex + 1) % MONITOR_CAPACITY;
-  }
-  Atomics.store(control, 1, writeIndex);
-  Atomics.notify(control, 1);
-}
-
 async function refresh() {
   try {
     let status;
@@ -504,7 +479,10 @@ function handleWasmWorkerMessage(event) {
     wasmBlockInfoReceived = true;
     wasmIsoAttached = Boolean(message.isoAttached);
     wasmDiskAttached = Boolean(message.diskAttached);
-    const summary = `QEMU info block: ISO ${wasmIsoAttached ? 'confirmed' : 'NOT confirmed'}; disk ${wasmDiskAttached ? 'confirmed' : 'NOT confirmed'}.`;
+    const verificationNote = message.timedOut
+      ? ' (monitor response timed out after 8 seconds)'
+      : message.error ? ` (${message.error})` : '';
+    const summary = `QEMU info block: ISO ${wasmIsoAttached ? 'confirmed' : 'NOT confirmed'}; disk ${wasmDiskAttached ? 'confirmed' : 'NOT confirmed'}${verificationNote}.`;
     setMessage('vmMessage', summary, !(wasmIsoAttached && wasmDiskAttached));
     if (message.detail) appendWasmLog('monitor', `\n[info block verification]\n${message.detail}`);
     void refresh();
@@ -525,7 +503,6 @@ function handleWasmWorkerMessage(event) {
     wasmReady = false;
     wasmEverStarted = true;
     wasmWorker = null;
-    wasmMonitorBuffer = null;
     wasmIsoAttached = false;
     wasmDiskAttached = false;
     wasmBlockInfoReceived = false;
@@ -574,7 +551,6 @@ async function startWasmVm(mode) {
     await refresh();
     return;
   }
-  wasmMonitorBuffer = new SharedArrayBuffer(MONITOR_HEADER_BYTES + MONITOR_CAPACITY);
   const workerUrl = new URL('qemu-wasm/worker.js', document.baseURI);
   const worker = new Worker(workerUrl);
   wasmWorker = worker;
@@ -584,7 +560,7 @@ async function startWasmVm(mode) {
   });
   wasmCanvasTransferred = true;
   $('canvasStatus').textContent = 'Transferred to worker; guest frame not yet verified';
-  worker.postMessage({type: 'start', mode, canvas: offscreen, monitorBuffer: wasmMonitorBuffer}, [offscreen]);
+  worker.postMessage({type: 'start', mode, canvas: offscreen}, [offscreen]);
   $('vmState').textContent = 'QEMU-WASM starting';
   $('screenWrap').classList.remove('hidden');
   setMessage('vmMessage', 'Opening OPFS files and initializing QEMU-WASM…');
@@ -594,7 +570,8 @@ async function startWasmVm(mode) {
 async function stopWasmVm() {
   if (!wasmWorker) return false;
   try {
-    writeWasmMonitorInput('quit');
+    // The worker writes to the PTY master, which wakes QEMU's monitor reader.
+    wasmWorker.postMessage({type: 'stop'});
   } catch (error) {
     setMessage('vmMessage', error.message, true);
     return false;
@@ -667,7 +644,9 @@ $('sendMonitor').addEventListener('click', () => {
   const command = $('monitorCommand').value.trim();
   if (!command || !wasmWorker || !wasmReady) return;
   try {
-    writeWasmMonitorInput(command);
+    // Do not write into a shared ring buffer: the worker's PTY path emits
+    // the readable event QEMU is waiting for.
+    wasmWorker.postMessage({type: 'monitor', command});
     $('monitorCommand').value = '';
   } catch (error) {
     setMessage('vmMessage', error.message, true);

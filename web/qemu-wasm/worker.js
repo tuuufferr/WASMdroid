@@ -367,6 +367,10 @@ async function openStorage() {
 async function start(message) {
   try {
     if (!message.canvas) throw new Error('The QEMU display canvas was not transferred to the worker.');
+    message.canvas.id = 'qemuScreen';
+    if (message.canvas.id !== 'qemuScreen') {
+      throw new Error('Could not assign QEMU canvas ID for PThread transfer.');
+    }
     const graphics = probeWorkerWebGL();
     post('graphics-preflight', graphics);
     if (!graphics.ok) throw new Error(graphics.detail);

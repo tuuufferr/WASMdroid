@@ -61,5 +61,8 @@ docker cp "$CONTAINER:/build/qemu/load.js" "$OUTPUT/"
 docker cp "$CONTAINER:/build/node_modules/xterm-pty/index.js" "$OUTPUT/pty.js"
 docker cp "$CONTAINER:/build/node_modules/xterm-pty/LICENSE.txt" "$OUTPUT/NOTICE-xterm-pty.txt"
 
+# Keep EGL calls on the pthread that owns the transferred OffscreenCanvas.
+python3 "$ROOT/scripts/patch-qemu-egl.py" "$OUTPUT/qemu-system-x86_64.js"
+
 printf '{\n  "target": "x86_64-softmmu",\n  "qemuVersion": "8.2.0",\n  "sourceRevision": "%s",\n  "machine": "pc (i440FX/PIIX IDE)",\n  "isoDevice": "ide-cd, read-only",\n  "diskDevice": "ide-hd, raw and writable",\n  "display": "SDL2 with OffscreenCanvas"\n}\n' "$EXPECTED_REVISION" > "$OUTPUT/manifest.json"
 echo "QEMU-WASM runtime built in $OUTPUT"

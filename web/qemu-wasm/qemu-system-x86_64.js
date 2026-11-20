@@ -7561,7 +7561,6 @@ var EGL = {
 };
 
 function _eglBindAPI(api) {
- if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(49, 1, api);
  if (api == 12448) /* EGL_OPENGL_ES_API */ {
   EGL.setErrorCode(12288);
   /* EGL_SUCCESS */ return 1;
@@ -7571,7 +7570,6 @@ function _eglBindAPI(api) {
 }
 
 function _eglChooseConfig(display, attrib_list, configs, config_size, numConfigs) {
- if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(50, 1, display, attrib_list, configs, config_size, numConfigs);
  display >>>= 0;
  attrib_list >>>= 0;
  configs >>>= 0;
@@ -7580,7 +7578,6 @@ function _eglChooseConfig(display, attrib_list, configs, config_size, numConfigs
 }
 
 function _eglCreateContext(display, config, hmm, contextAttribs) {
- if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(51, 1, display, config, hmm, contextAttribs);
  display >>>= 0;
  config >>>= 0;
  hmm >>>= 0;
@@ -7625,7 +7622,6 @@ function _eglCreateContext(display, config, hmm, contextAttribs) {
 }
 
 function _eglCreateWindowSurface(display, config, win, attrib_list) {
- if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(52, 1, display, config, win, attrib_list);
  display >>>= 0;
  config >>>= 0;
  attrib_list >>>= 0;
@@ -7642,7 +7638,6 @@ function _eglCreateWindowSurface(display, config, win, attrib_list) {
 }
 
 function _eglDestroyContext(display, context) {
- if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(53, 1, display, context);
  display >>>= 0;
  context >>>= 0;
  if (display != 62e3) {
@@ -7662,7 +7657,6 @@ function _eglDestroyContext(display, context) {
 }
 
 function _eglDestroySurface(display, surface) {
- if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(54, 1, display, surface);
  display >>>= 0;
  surface >>>= 0;
  if (display != 62e3) {
@@ -7684,7 +7678,6 @@ function _eglDestroySurface(display, surface) {
 }
 
 function _eglGetConfigAttrib(display, config, attribute, value) {
- if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(55, 1, display, config, attribute, value);
  display >>>= 0;
  config >>>= 0;
  value >>>= 0;
@@ -7825,7 +7818,6 @@ function _eglGetConfigAttrib(display, config, attribute, value) {
 }
 
 function _eglGetDisplay(nativeDisplayType) {
- if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(56, 1, nativeDisplayType);
  nativeDisplayType >>>= 0;
  EGL.setErrorCode(12288);
  if (nativeDisplayType != 0 && /* EGL_DEFAULT_DISPLAY */ nativeDisplayType != 1) /* see library_xlib.js */ {
@@ -7835,12 +7827,10 @@ function _eglGetDisplay(nativeDisplayType) {
 }
 
 function _eglGetError() {
- if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(57, 1);
  return EGL.errorCode;
 }
 
 function _eglInitialize(display, majorVersion, minorVersion) {
- if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(58, 1, display, majorVersion, minorVersion);
  display >>>= 0;
  majorVersion >>>= 0;
  minorVersion >>>= 0;
@@ -7860,7 +7850,6 @@ function _eglInitialize(display, majorVersion, minorVersion) {
 }
 
 function _eglMakeCurrent(display, draw, read, context) {
- if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(59, 1, display, draw, read, context);
  display >>>= 0;
  draw >>>= 0;
  read >>>= 0;
@@ -7886,7 +7875,6 @@ function _eglMakeCurrent(display, draw, read, context) {
 }
 
 function _eglQueryString(display, name) {
- if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(60, 1, display, name);
  display >>>= 0;
  if (display != 62e3) {
   EGL.setErrorCode(12296);
@@ -7921,7 +7909,6 @@ function _eglQueryString(display, name) {
 }
 
 function _eglSwapBuffers(dpy, surface) {
- if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(61, 1, dpy, surface);
  dpy >>>= 0;
  surface >>>= 0;
  if (!EGL.defaultDisplayInitialized) {
@@ -7938,7 +7925,6 @@ function _eglSwapBuffers(dpy, surface) {
 }
 
 function _eglSwapInterval(display, interval) {
- if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(62, 1, display, interval);
  display >>>= 0;
  if (display != 62e3) {
   EGL.setErrorCode(12296);
@@ -7950,7 +7936,6 @@ function _eglSwapInterval(display, interval) {
 }
 
 function _eglTerminate(display) {
- if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(63, 1, display);
  display >>>= 0;
  if (display != 62e3) {
   EGL.setErrorCode(12296);
@@ -7973,7 +7958,6 @@ function _eglTerminate(display) {
 var _eglWaitGL = _eglWaitClient;
 
 function _eglWaitNative(nativeEngineId) {
- if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(65, 1, nativeEngineId);
  EGL.setErrorCode(12288);
  /* EGL_SUCCESS */ return 1;
 }

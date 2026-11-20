@@ -2,11 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Android in Browser — Boot Console</title>
-  <link rel="stylesheet" href="/style.css">
+  <title>WASMdroid — Android in Browser</title>
+  <link rel="stylesheet" href="./style.css">
 </head>
 <body>
-<header><div class="eyebrow">ANDROID-X86 • BROWSER STORAGE • QEMU</div><h1>Android boot console</h1><p>Select an Android-x86 ISO from your device and save it in this browser. The ISO is not uploaded to the Codespace.</p></header>
+<header><div class="eyebrow">ANDROID-X86 • BROWSER STORAGE • QEMU</div><h1>WASMdroid</h1><p>Select an Android-x86 ISO from your device and save it in this browser. The ISO is not uploaded to the Codespace.</p></header>
 <main>
   <section class="card">
     <div class="section-head"><h2>1. Check environment</h2><button id="refresh" class="small">Refresh</button></div>
@@ -44,12 +44,21 @@
     <div class="section-head"><h2>5. Live diagnostics</h2><span id="vmState" class="pill">Not started</span></div>
     <div class="monitor-row"><input id="monitorCommand" type="text" autocomplete="off" placeholder="QEMU monitor command, e.g. info block" aria-label="QEMU monitor command"><button id="sendMonitor" disabled>Send monitor command</button></div>
     <div class="grid"><div><label>QEMU output</label><pre id="qemuLog">No log yet.</pre></div><div><label>Serial output</label><pre id="serialLog">No serial bytes yet.</pre></div></div>
+    <div class="disk-status">
+      <div><b>Worker WebGL test</b><span id="graphicsStatus">Not run</span></div>
+      <div><b>QEMU monitor</b><span id="monitorStatus">Not started</span></div>
+      <div><b>ISO attached</b><span id="isoAttachedStatus">Not verified</span></div>
+      <div><b>Disk attached</b><span id="diskDeviceStatus">Not verified</span></div>
+      <div><b>QEMU canvas</b><span id="canvasStatus">Not transferred</span></div>
+      <div><b>Guest boot</b><span id="guestBootStatus">Not observed</span></div>
+    </div>
+
   </section>
   <section class="card subtle">
     <h2>Architecture status</h2>
     <p>The browser worker opens OPFS directly. It exposes the ISO through a chunked, read-only Emscripten file node and the raw disk through random-access OPFS synchronous reads/writes; QEMU sees ordinary paths and attaches them to the PC machine's IDE controller.</p>
   </section>
 </main>
-<footer>Android Browser Boot • user-supplied Android-x86 ISO • no Google proprietary components included</footer>
-<script src="/app.js"></script>
+<footer>WASMdroid • user-supplied Android-x86 ISO • no Google proprietary components included</footer>
+<script src="./app.js"></script>
 </body></html>

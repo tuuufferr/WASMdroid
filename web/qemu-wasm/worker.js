@@ -9,6 +9,9 @@ let finished = false;
 let serialOffset = 0;
 let serialTimer = null;
 let monitorOutput = '';
+let blockInfoPending = false;
+let blockInfoOutput = '';
+let blockInfoTimer = null;
 const monitorDecoder = new TextDecoder();
 
 const DISK_BYTES = 8 * 1024 ** 3;
@@ -170,22 +173,57 @@ function finish(exitCode, errorMessage = '') {
   if (finished) return;
   finished = true;
   if (serialTimer) clearInterval(serialTimer);
+  if (blockInfoTimer) clearTimeout(blockInfoTimer);
+  blockInfoTimer = null;
+  blockInfoPending = false;
   flushSerial();
   const flushError = closeDiskAccess();
   post('stopped', {exitCode, error: errorMessage, flushError});
   setTimeout(() => self.close(), 0);
 }
 
+function requestBlockInfo() {
+  if (blockInfoPending || !writeToPty) return;
+  blockInfoPending = true;
+  blockInfoOutput = '';
+  writeToPty('info block\r');
+  blockInfoTimer = setTimeout(() => {
+    if (!blockInfoPending) return;
+    blockInfoPending = false;
+    post('block-devices', {
+      isoAttached: blockInfoOutput.includes('/opfs/android-x86.iso'),
+      diskAttached: blockInfoOutput.includes('/opfs/android-data.raw'),
+      timedOut: true,
+      detail: blockInfoOutput.slice(-4000),
+    });
+  }, 8000);
+}
+
 function onMonitorData(bytes, acknowledge) {
   const text = monitorDecoder.decode(Uint8Array.from(bytes), {stream: true});
   monitorOutput = (monitorOutput + text).slice(-16000);
   post('monitor-output', {data: text});
+  if (blockInfoPending) {
+    blockInfoOutput = (blockInfoOutput + text).slice(-8000);
+    if (blockInfoOutput.includes('(qemu)')) {
+      blockInfoPending = false;
+      if (blockInfoTimer) clearTimeout(blockInfoTimer);
+      blockInfoTimer = null;
+      post('block-devices', {
+        isoAttached: blockInfoOutput.includes('/opfs/android-x86.iso'),
+        diskAttached: blockInfoOutput.includes('/opfs/android-data.raw'),
+        timedOut: false,
+        detail: blockInfoOutput.slice(-4000),
+      });
+    }
+  }
   if (!ready && monitorOutput.includes('(qemu)')) {
     ready = true;
     post('ready', {
       machine: 'pc (i440FX/PIIX IDE)',
-      devices: 'read-only IDE CD-ROM + writable raw IDE disk',
+      devices: 'Monitor prompt received; checking block devices with info block.',
     });
+    requestBlockInfo();
     if (stopRequested) writeToPty('quit\r');
   }
   if (acknowledge) acknowledge();
@@ -252,6 +290,35 @@ function attachSharedMonitorInput(slave, buffer) {
   };
 }
 
+function probeWorkerWebGL() {
+  if (typeof OffscreenCanvas !== 'function') return {ok: false, detail: 'OffscreenCanvas unavailable in worker.'};
+  try {
+    const probe = new OffscreenCanvas(4, 4);
+    const gl = probe.getContext('webgl', {alpha: false, antialias: false});
+    if (!gl) return {ok: false, detail: 'Worker WebGL 1 context creation failed.'};
+    gl.disable(gl.DITHER);
+    gl.viewport(0, 0, 4, 4);
+    gl.clearColor(0.25, 0.5, 0.75, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.finish();
+    const pixel = new Uint8Array(4);
+    gl.readPixels(1, 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+    const expected = [64, 128, 191, 255];
+    const ok = expected.every((v, i) => Math.abs(pixel[i] - v) <= 4);
+    const version = String(gl.getParameter(gl.VERSION) || 'WebGL 1');
+    const lose = gl.getExtension('WEBGL_lose_context');
+    if (lose) lose.loseContext();
+    return {
+      ok,
+      version,
+      detail: ok ? `Worker WebGL pixel readback passed (${version}).`
+                 : `WebGL pixel readback mismatch: ${Array.from(pixel).join(',')}`,
+    };
+  } catch (e) {
+    return {ok: false, detail: `Worker WebGL test failed: ${e.message}`};
+  }
+}
+
 async function openStorage() {
   if (!navigator.storage || typeof navigator.storage.getDirectory !== 'function') {
     throw new Error('OPFS is unavailable in this browser worker; use a current browser over HTTPS.');
@@ -282,6 +349,9 @@ async function openStorage() {
 async function start(message) {
   try {
     if (!message.canvas) throw new Error('The QEMU display canvas was not transferred to the worker.');
+    const graphics = probeWorkerWebGL();
+    post('graphics-preflight', graphics);
+    if (!graphics.ok) throw new Error(graphics.detail);
     if (typeof SharedArrayBuffer === 'undefined') {
       throw new Error('QEMU-WASM requires SharedArrayBuffer. Serve this page with Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp.');
     }

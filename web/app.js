@@ -9,8 +9,14 @@ let diskError = '';
 let wasmManifest = null;
 let wasmWorker = null;
 let wasmMonitorBuffer = null;
-let wasmReady = false;
+let wasmReady = false; // QEMU monitor ready; not proof of Android boot.
 let wasmEverStarted = false;
+let wasmIsoAttached = false;
+let wasmDiskAttached = false;
+let wasmBlockInfoReceived = false;
+let wasmGraphicsPreflight = null;
+let wasmCanvasTransferred = false;
+let wasmGuestBootObserved = false;
 let wasmMonitorLog = '';
 let wasmSerialLog = '';
 let lastStorageState = {storedIso: null, storedDisk: null, storageError: '', diskReadError: ''};
@@ -120,7 +126,7 @@ async function requestStoragePersistence() {
 }
 
 async function readWasmManifest() {
-  const response = await fetch('/qemu-wasm/manifest.json', {cache: 'no-store'});
+  const response = await fetch(new URL('qemu-wasm/manifest.json', document.baseURI), {cache: 'no-store'});
   if (response.status === 404) return null;
   if (!response.ok) throw new Error(`Could not check the QEMU-WASM build: HTTP ${response.status}`);
   const manifest = await response.json();
@@ -327,7 +333,20 @@ function writeWasmMonitorInput(command) {
 
 async function refresh() {
   try {
-    const status = await api('/api/status');
+    let status;
+    try {
+      status = await api('/api/status');
+    } catch (error) {
+      // Static sites do not expose the optional Codespaces native-QEMU API.
+      // Browser QEMU-WASM and OPFS must remain usable without that backend.
+      status = {
+        api_available: false,
+        qemu: {installed: false, version: null, running: false, pid: null},
+        qemu_img: {installed: false, version: null},
+        novnc: {installed: false, web_root: null, proxy_running: false},
+        qemu_tail: '', serial_tail: '', last_error: '',
+      };
+    }
     let runtimeError = '';
     try {
       wasmManifest = await readWasmManifest();
@@ -381,9 +400,31 @@ async function refresh() {
     $('diskCreatedStatus').textContent = diskIsValid
       ? 'Yes — present in browser OPFS'
       : storedDisk ? `No — invalid disk size (${formatBytes(storedDisk.size)})` : 'No';
-    $('diskAttachedStatus').textContent = wasmReady
-      ? 'Yes — writable OPFS block device attached to QEMU-WASM'
-      : 'No — start QEMU-WASM after the ISO and disk are ready';
+    $('diskAttachedStatus').textContent = !wasmWorker
+      ? 'No — QEMU-WASM is not running'
+      : !wasmReady
+        ? 'Waiting for the QEMU monitor'
+        : !wasmBlockInfoReceived
+          ? 'Monitor ready; checking info block…'
+          : wasmDiskAttached
+            ? 'Confirmed by QEMU info block'
+            : 'Not confirmed by QEMU info block';
+    $('graphicsStatus').textContent = wasmGraphicsPreflight === null
+      ? 'Not run'
+      : wasmGraphicsPreflight ? 'PASS — worker WebGL test' : 'FAIL — see QEMU output';
+    $('monitorStatus').textContent = wasmReady ? 'Monitor prompt received' : wasmWorker ? 'Starting…' : 'Not started';
+    $('isoAttachedStatus').textContent = wasmBlockInfoReceived
+      ? wasmIsoAttached ? 'Confirmed by QEMU info block' : 'Not confirmed by QEMU info block'
+      : 'Not verified';
+    $('diskDeviceStatus').textContent = wasmBlockInfoReceived
+      ? wasmDiskAttached ? 'Confirmed by QEMU info block' : 'Not confirmed by QEMU info block'
+      : 'Not verified';
+    $('canvasStatus').textContent = wasmCanvasTransferred
+      ? 'Transferred to worker; guest frame not yet verified'
+      : 'Not transferred';
+    $('guestBootStatus').textContent = wasmGuestBootObserved
+      ? 'Early Linux/Android serial marker seen; UI readiness not proven'
+      : 'Not observed in serial output';
     $('diskCapacityStatus').textContent = storedDisk
       ? `${formatBytes(storedDisk.size)}${diskIsValid ? ' (raw)' : ' (expected 8 GiB raw)'}`
       : '8 GiB requested';
@@ -397,7 +438,7 @@ async function refresh() {
     $('stop').disabled = !wasmWorker && !status.qemu.running;
     $('sendMonitor').disabled = !wasmReady;
     $('vmState').textContent = wasmWorker
-      ? wasmReady ? 'QEMU-WASM running' : 'QEMU-WASM starting'
+      ? wasmReady ? 'QEMU-WASM monitor ready' : 'QEMU-WASM starting'
       : status.qemu.running ? `Native fallback running · PID ${status.qemu.pid}` : wasmEverStarted ? 'QEMU-WASM stopped' : 'Not started';
     $('qemuLog').textContent = wasmEverStarted ? wasmMonitorLog || 'No QEMU monitor output yet.' : status.qemu_tail || 'No log yet.';
     $('serialLog').textContent = wasmEverStarted ? wasmSerialLog || 'No serial bytes yet.' : status.serial_tail || 'No serial bytes yet.';
@@ -439,6 +480,10 @@ function appendWasmLog(which, text) {
     wasmSerialLog = (wasmSerialLog + text).slice(-maxLength);
     $('serialLog').textContent = wasmSerialLog;
     $('serialLog').scrollTop = $('serialLog').scrollHeight;
+    if (/\bLinux version\b|\bBooting the Linux kernel\b|\bAndroid-x86\b|\bzygote\b|\bSystemServer\b/i.test(text)) {
+      wasmGuestBootObserved = true;
+      $('guestBootStatus').textContent = 'Early Linux/Android serial marker seen; UI readiness not proven';
+    }
   } else {
     wasmMonitorLog = (wasmMonitorLog + text).slice(-maxLength);
     $('qemuLog').textContent = wasmMonitorLog;
@@ -451,10 +496,23 @@ function handleWasmWorkerMessage(event) {
   if (message.type === 'monitor-output') appendWasmLog('monitor', message.data);
   if (message.type === 'serial-output') appendWasmLog('serial', message.data);
   if (message.type === 'status') setMessage('vmMessage', message.message);
+  if (message.type === 'graphics-preflight') {
+    wasmGraphicsPreflight = Boolean(message.ok);
+    $('graphicsStatus').textContent = message.ok ? `PASS — ${message.detail}` : `FAIL — ${message.detail}`;
+  }
+  if (message.type === 'block-devices') {
+    wasmBlockInfoReceived = true;
+    wasmIsoAttached = Boolean(message.isoAttached);
+    wasmDiskAttached = Boolean(message.diskAttached);
+    const summary = `QEMU info block: ISO ${wasmIsoAttached ? 'confirmed' : 'NOT confirmed'}; disk ${wasmDiskAttached ? 'confirmed' : 'NOT confirmed'}.`;
+    setMessage('vmMessage', summary, !(wasmIsoAttached && wasmDiskAttached));
+    if (message.detail) appendWasmLog('monitor', `\n[info block verification]\n${message.detail}`);
+    void refresh();
+  }
   if (message.type === 'ready') {
     wasmReady = true;
     wasmEverStarted = true;
-    setMessage('vmMessage', `QEMU-WASM initialized · ${message.machine} · ${message.devices}`);
+    setMessage('vmMessage', 'QEMU monitor ready; checking ISO and disk with info block…');
     $('sendMonitor').disabled = false;
   }
   if (message.type === 'error') {
@@ -468,6 +526,10 @@ function handleWasmWorkerMessage(event) {
     wasmEverStarted = true;
     wasmWorker = null;
     wasmMonitorBuffer = null;
+    wasmIsoAttached = false;
+    wasmDiskAttached = false;
+    wasmBlockInfoReceived = false;
+    wasmCanvasTransferred = false;
     if (message.flushError) {
       setMessage('vmMessage', `QEMU stopped, but OPFS disk flush failed: ${message.flushError}`, true);
     } else {
@@ -491,6 +553,12 @@ async function startWasmVm(mode) {
   wasmMonitorLog = '';
   wasmSerialLog = '';
   wasmReady = false;
+  wasmIsoAttached = false;
+  wasmDiskAttached = false;
+  wasmBlockInfoReceived = false;
+  wasmGraphicsPreflight = null;
+  wasmCanvasTransferred = false;
+  wasmGuestBootObserved = false;
   wasmEverStarted = true;
   const oldCanvas = $('qemuScreen');
   const canvas = oldCanvas.cloneNode(false);
@@ -507,12 +575,15 @@ async function startWasmVm(mode) {
     return;
   }
   wasmMonitorBuffer = new SharedArrayBuffer(MONITOR_HEADER_BYTES + MONITOR_CAPACITY);
-  const worker = new Worker('/qemu-wasm/worker.js');
+  const workerUrl = new URL('qemu-wasm/worker.js', document.baseURI);
+  const worker = new Worker(workerUrl);
   wasmWorker = worker;
   worker.addEventListener('message', handleWasmWorkerMessage);
   worker.addEventListener('error', event => {
     setMessage('vmMessage', `QEMU-WASM worker error: ${event.message}`, true);
   });
+  wasmCanvasTransferred = true;
+  $('canvasStatus').textContent = 'Transferred to worker; guest frame not yet verified';
   worker.postMessage({type: 'start', mode, canvas: offscreen, monitorBuffer: wasmMonitorBuffer}, [offscreen]);
   $('vmState').textContent = 'QEMU-WASM starting';
   $('screenWrap').classList.remove('hidden');

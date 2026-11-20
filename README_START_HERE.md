@@ -87,3 +87,7 @@ ANDROID_RAM_MB=4096 ANDROID_CPUS=2 ANDROID_DISK_SIZE=24G ./START.sh
 
 See [docs/BOOT_FLOW.md](./docs/BOOT_FLOW.md) for what is implemented and what
 still needs verification.
+
+## Static deployment note
+
+Publish `web/` using a host that honors `web/_headers` (COOP/COEP). GitHub Pages ignores `_headers`, so it does not satisfy the SharedArrayBuffer requirement. See [STATIC_DEPLOYMENT.md](STATIC_DEPLOYMENT.md).
